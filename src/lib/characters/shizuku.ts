@@ -107,61 +107,91 @@ ${history.map((m) => `${m.role}: ${m.content}`).join("\n")}
 }
 `;
 
-      console.log("[Gemini API] Evaluating context and intent with gemini-3.5-flash...");
-      
-      // 8秒のタイムアウト保護（Googleの混雑や回線遅延でフリーズするのを防ぐ）
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Gemini API call timed out after 8s")), 8000)
-      );
+      let responseText: string | null = null;
 
-      const apiCallPromise = ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: { responseMimeType: "application/json" },
-      });
-
-      const response = await Promise.race([apiCallPromise, timeoutPromise]);
-
-      const text = response.text || "{}";
-      console.log("[Gemini API] Response received:", text);
-      const parsed = JSON.parse(text);
-
-      if (parsed.action === "recommend" && parsed.selectedAnimeId) {
-        const selectedAnime =
-          ANIME_DATABASE.find((a) => a.id === parsed.selectedAnimeId) || ANIME_DATABASE[0];
-
-        const isAvailableInPlan = selectedAnime.streamingPlatforms.some((p) =>
-          session.selectedVods.includes(p)
+      // 1. まず優先して gemini-3.5-flash-lite を試行（タイムアウト5秒）
+      try {
+        console.log("[Gemini API] Primary attempt with gemini-3.5-flash-lite (timeout: 5s)...");
+        const liteTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Flash Lite timed out after 5s")), 5000)
         );
+        const liteCall = ai.models.generateContent({
+          model: "gemini-3.5-flash-lite",
+          contents: prompt,
+          config: { responseMimeType: "application/json" },
+        });
+        const liteRes = await Promise.race([liteCall, liteTimeout]);
+        if (liteRes.text) {
+          responseText = liteRes.text;
+          console.log("[Gemini API] Primary gemini-3.5-flash-lite succeeded!");
+        }
+      } catch (liteErr) {
+        console.warn("[Gemini API] Flash Lite did not respond in time, failing over to gemini-3.5-flash:", (liteErr as Error).message);
+      }
 
-        let availabilityNote;
-        if (session.selectedVods.length > 0 && !isAvailableInPlan) {
-          const alternative = ANIME_DATABASE.find(
-            (a) =>
-              a.id !== selectedAnime.id &&
-              a.streamingPlatforms.some((p) => session.selectedVods.includes(p))
+      // 2. 返答が返ってこない時だけ gemini-3.5-flash に自動切り替え（タイムアウト8秒）
+      if (!responseText) {
+        try {
+          console.log("[Gemini API] Failover attempt with gemini-3.5-flash (timeout: 8s)...");
+          const flashTimeout = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Flash timed out after 8s")), 8000)
           );
-          availabilityNote = {
-            type: "out_of_plan_warning" as const,
-            message: `契約中のサービスで観られる『${alternative?.title || "他の作品"}』もおすすめだよ。`,
-            alternativeAnime: alternative,
+          const flashCall = ai.models.generateContent({
+            model: "gemini-3.5-flash",
+            contents: prompt,
+            config: { responseMimeType: "application/json" },
+          });
+          const flashRes = await Promise.race([flashCall, flashTimeout]);
+          if (flashRes.text) {
+            responseText = flashRes.text;
+            console.log("[Gemini API] Failover gemini-3.5-flash succeeded!");
+          }
+        } catch (flashErr) {
+          console.error("[Gemini API] Both Flash Lite and Flash failed:", flashErr);
+        }
+      }
+
+      if (responseText) {
+        console.log("[Gemini API] Response received:", responseText);
+        const parsed = JSON.parse(responseText);
+
+        if (parsed.action === "recommend" && parsed.selectedAnimeId) {
+          const selectedAnime =
+            ANIME_DATABASE.find((a) => a.id === parsed.selectedAnimeId) || ANIME_DATABASE[0];
+
+          const isAvailableInPlan = selectedAnime.streamingPlatforms.some((p) =>
+            session.selectedVods.includes(p)
+          );
+
+          let availabilityNote;
+          if (session.selectedVods.length > 0 && !isAvailableInPlan) {
+            const alternative = ANIME_DATABASE.find(
+              (a) =>
+                a.id !== selectedAnime.id &&
+                a.streamingPlatforms.some((p) => session.selectedVods.includes(p))
+            );
+            availabilityNote = {
+              type: "out_of_plan_warning" as const,
+              message: `契約中のサービスで観られる『${alternative?.title || "他の作品"}』もおすすめだよ。`,
+              alternativeAnime: alternative,
+            };
+          }
+
+          return {
+            role: "assistant",
+            content: parsed.message,
+            quickReplies: parsed.quickReplies || ["ありがとう、観てみるね", "もう少し話したいな", "他の作品もある？"],
+            recommendedAnime: selectedAnime,
+            availabilityNote,
+          };
+        } else {
+          // 傾聴モード
+          return {
+            role: "assistant",
+            content: parsed.message,
+            quickReplies: parsed.quickReplies || ["まだ悔しくてモヤモヤする", "少し話せて楽になった", "何か観て忘れようかな"],
           };
         }
-
-        return {
-          role: "assistant",
-          content: parsed.message,
-          quickReplies: parsed.quickReplies || ["ありがとう、観てみるね", "もう少し話したいな", "他の作品もある？"],
-          recommendedAnime: selectedAnime,
-          availabilityNote,
-        };
-      } else {
-        // 傾聴モード
-        return {
-          role: "assistant",
-          content: parsed.message,
-          quickReplies: parsed.quickReplies || ["まだ悔しくてモヤモヤする", "少し話せて楽になった", "何か観て忘れようかな"],
-        };
       }
     } catch (e) {
       console.error("[Gemini API] Error, falling back to smart mock:", e);
