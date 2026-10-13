@@ -107,12 +107,20 @@ ${history.map((m) => `${m.role}: ${m.content}`).join("\n")}
 }
 `;
 
-      console.log("[Gemini API] Evaluating context and intent with gemini-3.5-flash-lite...");
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash-lite",
+      console.log("[Gemini API] Evaluating context and intent with gemini-3.5-flash...");
+      
+      // 8秒のタイムアウト保護（Googleの混雑や回線遅延でフリーズするのを防ぐ）
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Gemini API call timed out after 8s")), 8000)
+      );
+
+      const apiCallPromise = ai.models.generateContent({
+        model: "gemini-3.5-flash",
         contents: prompt,
         config: { responseMimeType: "application/json" },
       });
+
+      const response = await Promise.race([apiCallPromise, timeoutPromise]);
 
       const text = response.text || "{}";
       console.log("[Gemini API] Response received:", text);
